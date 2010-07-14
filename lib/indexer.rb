@@ -5,16 +5,22 @@ module Indexer
       element.sort! if element.is_a?(Array)
     end
   end
+
+  def self.get_subclass_names(class_name)
+    class_names = []
+    class_name.send(:subclasses).each do |model|
+      class_names += get_subclass_names(model)
+      class_names << model.name
+    end
+    class_names.flatten.uniq
+  end
+
   
   def self.check_for_indexes(migration_format = false)
-    model_names = []
-    Dir.chdir(Rails.root) do 
-      model_names = Dir["**/app/models/**/*.rb"].collect {|filename| File.basename(filename) }.uniq
-    end
+    class_names = self.get_subclass_names(ActiveRecord::Base)
 
     model_classes = []
-    model_names.each do |model_name|
-      class_name = model_name.sub(/\.rb$/,'').camelize
+    class_names.each do |class_name|
       begin
         klass = class_name.split('::').inject(Object){ |klass,part| klass.const_get(part) }
         if klass < ActiveRecord::Base && !klass.abstract_class?
