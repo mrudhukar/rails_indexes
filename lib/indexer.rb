@@ -1,5 +1,5 @@
 module Indexer
-  
+
   def self.sortalize(array)
     Marshal.load(Marshal.dump(array)).each do |element|
       element.sort! if element.is_a?(Array)
@@ -15,7 +15,19 @@ module Indexer
     class_names.flatten.uniq
   end
 
-  
+  def self.get_class_name_from_file(file_name)
+    base_name = File.basename(file_name).sub(/\.rb$/,'')
+    class_name = ""
+    file_name =~ /app\/(controllers|models)\/?(.*)\/#{base_name}\.rb/
+
+    if $2 && !$2.blank?
+      class_name = "#{$2.camelize}::"
+    end
+    class_name += base_name.camelize
+    return class_name
+  end
+
+
   def self.check_for_indexes(migration_format = false)
     class_names = self.get_subclass_names(ActiveRecord::Base)
 
@@ -30,14 +42,14 @@ module Indexer
         # No-op
       end
     end
-    
+
     @index_migrations = Hash.new([])
 
     model_classes.each do |class_name|
 
-      # check if this is an STI child instance      
+      # check if this is an STI child instance
       if class_name.base_class.name != class_name.name && (class_name.column_names.include?(class_name.base_class.inheritance_column) || class_name.column_names.include?(class_name.inheritance_column))
-        
+
         # add the inharitance column on the parent table
         # index migration for STI should require both the primary key and the inheritance_column in a composite index.
         @index_migrations[class_name.base_class.table_name] += [[class_name.inheritance_column, class_name.base_class.primary_key].sort] unless @index_migrations[class_name.base_class.table_name].include?([class_name.base_class.inheritance_column].sort)
@@ -48,11 +60,11 @@ module Indexer
         case reflection_options.macro
         when :belongs_to
           # polymorphic?
-          @table_name = class_name.table_name.to_s 
+          @table_name = class_name.table_name.to_s
           if reflection_options.options.has_key?(:polymorphic) && (reflection_options.options[:polymorphic] == true)
             poly_type = "#{reflection_options.name.to_s}_type"
             poly_id = "#{reflection_options.name.to_s}_id"
-    
+
             @index_migrations[@table_name.to_s] += [[poly_type, poly_id].sort] unless @index_migrations[@table_name.to_s].include?([poly_type, poly_id].sort)
           else
 
@@ -62,7 +74,7 @@ module Indexer
         when :has_and_belongs_to_many
           table_name = reflection_options.options[:join_table] ||= [class_name.table_name, reflection_name.to_s].sort.join('_')
           association_foreign_key = reflection_options.options[:association_foreign_key] ||= "#{reflection_name.to_s.singularize}_id"
-          
+
           # Guess foreign key?
           if reflection_options.options[:foreign_key]
             foreign_key = reflection_options.options[:foreign_key]
@@ -71,9 +83,9 @@ module Indexer
           else
             foreign_key = "#{class_name.name.tableize.singularize}_id"
           end
-          
+
           composite_keys = [association_foreign_key, foreign_key]
-          
+
           @index_migrations[table_name.to_s] += [composite_keys] unless @index_migrations[table_name].include?(composite_keys)
           @index_migrations[table_name.to_s] += [composite_keys.reverse] unless @index_migrations[table_name].include?(composite_keys.reverse)
 
@@ -84,7 +96,7 @@ module Indexer
     end
 
     @missing_indexes = {}
-    
+
     @index_migrations.each do |table_name, foreign_keys|
 
       unless foreign_keys.blank?
@@ -93,42 +105,42 @@ module Indexer
         @missing_indexes[table_name] = keys_to_add unless keys_to_add.empty?
       end
     end
-    
+
     @missing_indexes
   end
 
   def self.scan_finds
-    
-    
+
+
     # Collect all files that can contain queries, in app/ directories (includes plugins and such)
-    # TODO: add lib too ? 
+    # TODO: add lib too ?
     file_names = []
-    
-    Dir.chdir(Rails.root) do 
+
+    Dir.chdir(Rails.root) do
       file_names = Dir["**/app/**/*.rb"].uniq.reject {|file_with_path| file_with_path.include?('test')}
     end
-    
+
     @indexes_required = Hash.new([])
-    
+
     # Scan each file
-    file_names.each do |file_name| 
+    file_names.each do |file_name|
       current_file = File.open(File.join(Rails.root, file_name), 'r')
 
       # Scan each line
       current_file.each do |line|
-        
+
         # by default, try to add index on primary key, based on file name
         # this will fail if the file isnot a model file
-        
+
         begin
-          current_model_name = File.basename(file_name).sub(/\.rb$/,'').camelize
+          current_model_name = get_class_name_from_file(file_name)
         rescue
           # NO-OP
         end
-        
+
         # Get the model class
         klass = current_model_name.split('::').inject(Object){ |klass,part| klass.const_get(part) } rescue nil
-        
+
         # Only add primary key for active record dependent classes and non abstract ones too.
         if klass.present? && klass < ActiveRecord::Base && !klass.abstract_class?
           current_model = current_model_name.constantize
@@ -136,16 +148,16 @@ module Indexer
           table_name = current_model.table_name
           @indexes_required[table_name] += [primary_key] unless @indexes_required[table_name].include?(primary_key)
         end
-        
+
         check_line_for_find_indexes(file_name, line)
-        
+
       end
     end
-    
+
     @missing_indexes = {}
     @indexes_required.each do |table_name, foreign_keys|
 
-      unless foreign_keys.blank?          
+      unless foreign_keys.blank?
         begin
           if ActiveRecord::Base.connection.tables.include?(table_name.to_s)
             existing_indexes = ActiveRecord::Base.connection.indexes(table_name.to_sym).collect {|index| index.columns.size > 1 ? index.columns : index.columns.first}
@@ -159,44 +171,49 @@ module Indexer
         end
       end
     end
-    
+
     @indexes_required
   end
-  
+
   # Check line for find* methods (include find_all, find_by and just find)
   def self.check_line_for_find_indexes(file_name, line)
-    
+
     # TODO: Assumes that you have a called on #find. you can actually call #find without a caller in a model code. ex:
     # def something
     #   find(self.id)
     # end
     #
     # find_regexp = Regexp.new(/([A-Z]{1}[A-Za-z]+|self).(find){1}((_all){0,1}(_by_){0,1}([A-Za-z_]+))?\(([0-9A-Za-z"\':=>. \[\]{},]*)\)/)
-    
+
     find_regexp = Regexp.new(/(([A-Z]{1}[A-Za-z]+|self).)?(find){1}((_all){0,1}(_by_){0,1}([A-Za-z_]+))?\(([0-9A-Za-z"\':=>. \[\]{},]*)\)/)
-    
+
     # If line matched a finder
     if matches = find_regexp.match(line)
 
       model_name, column_names, options = matches[2], matches[7], matches[8]
-      
+
       # if the finder class is "self" or empty (can be a simple "find()" in a model)
       if model_name == "self" || model_name.blank?
-        model_name = File.basename(file_name).sub(/\.rb$/,'').camelize
-        table_name = model_name.constantize.table_name            
+        return if file_name.match(/controllers/)
+
+        model_name = get_class_name_from_file(file_name)
+        return unless model_name.constantize.ancestors.include?(ActiveRecord::Base)
+        table_name = model_name.constantize.table_name
       else
+        return if model_name == "Session"
         if model_name.respond_to?(:constantize)
-          if model_name.constantize.respond_to?(:table_name)             
+          return unless model_name.constantize.ancestors.include?(ActiveRecord::Base)
+          if model_name.constantize.respond_to?(:table_name)
             table_name = model_name.constantize.table_name
           end
         end
       end
-      
+
       # Check that all prerequisites are met
       if model_name.present? && table_name.present?
         primary_key = model_name.constantize.primary_key
         @indexes_required[table_name] += [primary_key] unless @indexes_required[table_name].include?(primary_key)
-  
+
         if column_names.present?
           column_names = column_names.split('_and_')
 
@@ -217,12 +234,12 @@ module Indexer
       end
     end
   end
-  
-  def self.key_exists?(table,key_columns)     
+
+  def self.key_exists?(table,key_columns)
     result = (key_columns.to_a - ActiveRecord::Base.connection.indexes(table).map { |i| i.columns }.flatten)
     result.empty?
   end
-  
+
   def self.simple_migration
     migration_format = true
     missing_indexes = check_for_indexes(migration_format)
@@ -242,14 +259,14 @@ module Indexer
             add << "add_index :#{table_name}, :#{key}"
             remove << "remove_index :#{table_name}, :#{key}"
           end
-          
+
         end
       end
-      
-      migration = <<EOM  
+
+      migration = <<EOM
 class AddMissingIndexes < ActiveRecord::Migration
   def self.up
-    
+
     # These indexes were found by searching for AR::Base finds on your application
     # It is strongly recommanded that you will consult a professional DBA about your infrastucture and implemntation before
     # changing your database in that matter.
@@ -260,10 +277,10 @@ class AddMissingIndexes < ActiveRecord::Migration
     # http://www.railstutor.org
     # http://guides.rubyonrails.org
 
-    
+
     #{add.uniq.join("\n    ")}
   end
-  
+
   def self.down
     #{remove.uniq.join("\n    ")}
   end
@@ -274,16 +291,16 @@ EOM
       puts migration
     end
   end
-  
+
   def self.indexes_list
     check_for_indexes.each do |table_name, keys_to_add|
       puts "Table '#{table_name}' => #{keys_to_add.to_sentence}"
     end
   end
-  
+
   def self.ar_find_indexes(migration_mode=true)
     find_indexes = self.scan_finds
-    
+
     if migration_mode
       unless find_indexes.keys.empty?
         add = []
@@ -300,14 +317,14 @@ EOM
               add << "add_index :#{table_name}, :#{key}"
               remove << "remove_index :#{table_name}, :#{key}"
             end
-          
+
           end
         end
-      
-        migration = <<EOM      
+
+        migration = <<EOM
 class AddFindsMissingIndexes < ActiveRecord::Migration
   def self.up
-  
+
     # These indexes were found by searching for AR::Base finds on your application
     # It is strongly recommanded that you will consult a professional DBA about your infrastucture and implemntation before
     # changing your database in that matter.
@@ -317,7 +334,7 @@ class AddFindsMissingIndexes < ActiveRecord::Migration
     # http://www.railsmentors.org
     # http://www.railstutor.org
     # http://guides.rubyonrails.org
-  
+
     #{add.uniq.join("\n    ")}
   end
 
@@ -326,7 +343,7 @@ class AddFindsMissingIndexes < ActiveRecord::Migration
   end
 end
 EOM
- 
+
         puts "## Drop this into a file in db/migrate ##"
         puts migration
       end
