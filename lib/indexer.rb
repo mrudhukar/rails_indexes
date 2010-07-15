@@ -194,8 +194,6 @@ module Indexer
 
       # if the finder class is "self" or empty (can be a simple "find()" in a model)
       if model_name == "self" || model_name.blank?
-        return if file_name.match(/controllers/)
-
         model_name = get_class_name_from_file(file_name)
         return unless model_name.constantize.ancestors.include?(ActiveRecord::Base)
         table_name = model_name.constantize.table_name
